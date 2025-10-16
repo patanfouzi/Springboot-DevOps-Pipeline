@@ -1,0 +1,6 @@
+- name: Configure app server and deploy Petclinic
+  hosts: app
+  become: true
+  roles:
+    - docker
+    - spring-petclinic
