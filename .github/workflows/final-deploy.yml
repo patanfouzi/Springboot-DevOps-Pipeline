@@ -1,0 +1,216 @@
+name: final deploy
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  mysql-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      mysql_ip: ${{ steps.mysql-ip.outputs.mysql_ip }}
+
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Setup Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.6"
+
+      # Step 3: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 4: Setup Terraform backend (if applicable)
+      - name: Setup Backend
+        run: |
+          chmod +x ./create-backend.sh
+          ./create-backend.sh
+
+      # Step 5: Terraform init
+      - name: Terraform init
+        working-directory: ./terraform/
+        run: terraform init
+
+      # Step 6: Terraform apply
+      - name: Terraform apply
+        working-directory: ./terraform/
+        run: terraform destroy -auto-approve -lock=false -var="key_name=${{ secrets.KEY_NAME }}"
+
+      - name: Save Terraform output
+        working-directory: ./terraform/
+        run: terraform output -json > tfoutput.json
+
+      - name: Upload Terraform output
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfoutput
+          path: terraform/tfoutput.json
+
+      #  Install prerequisites (Ansible + jq)
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip jq
+          pip3 install ansible
+
+      - name: Save MySQL IP
+        id: mysql-ip
+        run: |
+          MYSQL_IP=$(jq -r '.mysql_private_ip.value[]' terraform/tfoutput.json)
+          echo "mysql_ip=$MYSQL_IP" >> $GITHUB_OUTPUT
+
+
+      # Step 9: Add SSH key
+      - name: Add SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      # Step 10: Disable host key checking   
+      - name: Disable host key checking
+        run: |
+          echo "Host *" > ~/.ssh/config
+          echo "    StrictHostKeyChecking no" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      # Step 11: Wait for EC2 SSH to be ready
+      - name: Wait for EC2 SSH to be ready
+        run: sleep 30
+
+      # Step 12: Generate Ansible inventory using Terraform output
+      - name: Generate Ansible inventory
+        run: |
+          python3 scripts/tf-to-inventory.py terraform/tfoutput.json > ansible/inventory.ini
+          cat ansible/inventory.ini
+
+      # Step 13: Run Mysql Ansible playbook (directly)
+      - name: Run MySQL Ansible playbook
+        working-directory: ./ansible/
+        run: |
+          export ANSIBLE_ROLES_PATH=./roles
+          ansible-playbook -i inventory.ini playbooks/mysql.yml --private-key ~/.ssh/id_rsa -vv
+
+  build-jar:
+    name: Build Spring Petclinic JAR
+    runs-on: ubuntu-latest
+    needs: mysql-setup
+    env:
+      MYSQL_IP: ${{ needs.mysql-setup.outputs.mysql_ip }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download Terraform output
+        uses: actions/download-artifact@v4
+        with:
+          name: tfoutput
+          path: terraform/
+
+
+      - name: Clone Petclinic and update app.prop and sonar scan
+        run: |
+          git clone https://github.com/mehziya0352/spring-petclinic.git
+          cd spring-petclinic
+          sed -i "s|<MYSQL_SERVER_IP>|${MYSQL_IP}|g" src/main/resources/application.properties
+          mkdir -p ../ansible/roles/spring-petclinic/files
+          cp src/main/resources/application.properties ../ansible/roles/spring-petclinic/files/application.properties
+          ./mvnw -B -DskipTests package
+          cp target/*.jar ../ansible/roles/spring-petclinic/files/spring-petclinic.jar
+          ls -l ../ansible/roles/spring-petclinic/files/
+
+      - name: Run Trivy FS Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload JAR and application.properties
+        uses: actions/upload-artifact@v4
+        with:
+          name: petclinic-jar
+          path: |
+            ansible/roles/spring-petclinic/files/spring-petclinic.jar
+            ansible/roles/spring-petclinic/files/application.properties
+
+      
+  deploy:
+    name: Deploy Spring Petclinic JAR
+    runs-on: ubuntu-latest
+    needs: build-jar
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: petclinic-jar
+          path: ansible/roles/spring-petclinic/files/
+
+      - name: Download Terraform output
+        uses: actions/download-artifact@v4
+        with:
+          name: tfoutput
+          path: terraform/
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip jq
+          pip3 install ansible
+
+      - name: Add SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Disable host key checking   
+        run: |
+          echo "Host *" > ~/.ssh/config
+          echo "    StrictHostKeyChecking no" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Wait for EC2 SSH to be ready
+        run: sleep 30
+
+      - name: Generate Ansible inventory
+        run: |
+          python3 scripts/tf-to-inventory.py terraform/tfoutput.json > ansible/inventory.ini
+          cat ansible/inventory.ini
+
+      - name: Run App Ansible playbook
+        working-directory: ./ansible/
+        run: |
+          export ANSIBLE_ROLES_PATH=./roles
+          ansible-playbook -i inventory.ini playbooks/app.yml --private-key ~/.ssh/id_rsa -vv
+
+      - name: Show EC2 Public IP
+        run: |
+          IP=$(jq -r '.app_public_ip.value' terraform/tfoutput.json)
+          echo "Spring Petclinic will be available at: http://$IP:8080"
