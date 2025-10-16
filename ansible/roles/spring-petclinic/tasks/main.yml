@@ -1,0 +1,86 @@
+---
+- name: Ensure app directory exists
+  file:
+    path: /opt/spring-petclinic
+    state: directory
+    mode: '0755'
+    owner: ubuntu
+    group: ubuntu
+
+- name: Copy Spring Petclinic JAR to server
+  copy:
+    src: files/spring-petclinic.jar
+    dest: /opt/spring-petclinic/spring-petclinic.jar
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+
+- name: Copy application.properties to app server
+  copy:
+    src:  files/application.properties
+    dest: /opt/spring-petclinic/application.properties
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+- name: Copy Dockerfile
+  copy:
+    src: files/Dockerfile
+    dest: /opt/spring-petclinic/Dockerfile
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+
+- name: Stop any running Petclinic container
+  become: yes
+  command: docker stop petclinic-app
+  ignore_errors: yes
+
+- name: Remove old Petclinic container if exists
+  become: yes
+  command: docker rm petclinic-app
+  ignore_errors: yes
+
+- name: Build Spring Petclinic Docker image
+  become: yes
+  command: docker build -t petclinic-app .
+  args:
+    chdir: /opt/spring-petclinic/
+
+- name: Install Trivy
+  become: yes
+  shell: |
+    apt-get update
+    apt-get install -y wget
+    wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.67.2_Linux-64bit.deb
+    dpkg -i trivy_0.67.2_Linux-64bit.deb
+  args:
+    creates: /usr/local/bin/trivy
+
+
+- name: Run Trivy Image Scan
+  shell: |
+    trivy image --format table \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                petclinic-app:latest
+  register: trivy_scan
+  ignore_errors: yes
+
+- name: Run Petclinic container
+  become: yes
+  docker_container:
+    name: petclinic-app
+    image: petclinic-app
+    state: started
+    restart_policy: always
+    ports:
+      - "8080:8080"
+
+- name: Verify running containers
+  become: yes
+  command: docker ps
+  register: docker_ps_output
+
+- name: Show running container info
+  debug:
+    var: docker_ps_output.stdout
