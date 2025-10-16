@@ -1,0 +1,61 @@
+---
+- name: Install MySQL server
+  become: yes
+  apt:
+    name: mysql-server
+    state: present
+    update_cache: yes
+
+- name: Ensure MySQL service is started
+  become: yes
+  service:
+    name: mysql
+    state: started
+    enabled: yes
+
+- name: Install Python MySQL dependencies
+  become: yes
+  apt:
+    name: python3-pymysql
+    state: present
+    update_cache: yes
+
+- name: Change MySQL bind address
+  become: yes
+  lineinfile:
+    path: /etc/mysql/mysql.conf.d/mysqld.cnf
+    regexp: '^bind-address'
+    line: 'bind-address = 0.0.0.0'
+  notify: Restart MySQL
+
+- name: Set root password using socket
+  become: yes
+  community.mysql.mysql_user:
+    name: root
+    password: root
+    host: localhost
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    priv: '*.*:ALL,GRANT'
+    state: present
+
+- name: Create petclinic database
+  become: yes
+  community.mysql.mysql_db:
+    name: petclinic_db
+    state: present
+    login_user: root
+    login_password: root
+    login_host: localhost
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Create petclinic user for remote access
+  become: yes
+  community.mysql.mysql_user:
+    name: petclinic_user
+    password: Petclinic@123
+    priv: "petclinic_db.*:ALL"
+    host: "%"
+    login_user: root
+    login_password: root
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    state: present
