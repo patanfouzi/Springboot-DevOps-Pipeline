@@ -1,0 +1,31 @@
+---
+- name: Create systemd service for Spring Petclinic
+  become: yes
+  copy:
+    dest: /etc/systemd/system/spring-petclinic.service
+    content: |
+      [Unit]
+      Description=Spring Petclinic Service
+      After=network.target
+
+      [Service]
+      User=ubuntu
+      ExecStart=/usr/bin/java -jar /opt/spring-petclinic/spring-petclinic.jar
+      SuccessExitStatus=143
+      Restart=on-failure
+      RestartSec=10
+      WorkingDirectory=/opt/spring-petclinic
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Reload systemd daemon
+  become: yes
+  command: systemctl daemon-reload
+
+- name: Enable and start Petclinic service
+  become: yes
+  systemd:
+    name: spring-petclinic
+    state: started
+    enabled: yes
