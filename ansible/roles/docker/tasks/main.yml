@@ -1,0 +1,42 @@
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install required dependencies
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - software-properties-common
+    state: present
+    
+- name: Install docker.io
+  apt:
+    name: docker.io
+    state: present
+
+- name: Start and enable Docker service
+  service:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Add ubuntu user to docker group
+  user:
+    name: ubuntu
+    groups: docker
+    append: yes
+
+- name: Restart Docker service (to apply group changes)
+  service:
+    name: docker
+    state: restarted
+
+- name: Verify Docker installation
+  command: docker --version
+  register: docker_version
+
+- name: Display Docker version
+  debug:
+    msg: "Docker successfully installed: {{ docker_version.stdout }}"
